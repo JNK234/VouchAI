@@ -123,7 +123,16 @@ Create a `.env` file with:
 
 ```env
 ANTHROPIC_API_KEY=your_anthropic_api_key_here
-LOCUS_API_KEY=your_locus_api_key_here
+
+# Each agent has its own Locus API key
+HIRING_AGENT_LOCUS_API_KEY=your_hiring_agent_locus_api_key_here
+WORKER_AGENT_LOCUS_API_KEY=your_worker_agent_locus_api_key_here
+ARBITRATOR_LOCUS_API_KEY=your_arbitrator_locus_api_key_here
+
+# Agent wallet addresses on Base blockchain
+HIRING_AGENT_WALLET=0xYourHiringAgentWalletAddress
+WORKER_AGENT_WALLET=0xYourWorkerAgentWalletAddress
+ARBITRATOR_WALLET=0xYourArbitratorWalletAddress
 ```
 
 ### Running Individual Agents

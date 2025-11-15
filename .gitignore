@@ -37,6 +37,10 @@ src/marketplace/disputes/*.json
 src/marketplace/deliverables/**/*
 !src/marketplace/**/.gitkeep
 
+# Event bus files (generated during runtime)
+marketplace/events/pending/*.json
+marketplace/events/processed/*.json
+
 # Testing
 coverage/
 .nyc_output/

@@ -4,18 +4,30 @@
 import 'dotenv/config';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import * as readline from 'readline';
+import { AgentSubscriber } from '../../communication/AgentSubscriber.js';
+import { DisputeFiledEvent, ArbitrationCompleteEvent, BaseEvent } from '../../communication/events.js';
+import { randomUUID } from 'crypto';
+import * as marketplace from '../../shared/marketplace.js';
 
 interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
 }
 
-class ArbitrerAgent {
+class ArbitrerAgent extends AgentSubscriber {
   private sessionId?: string;
   private rl: readline.Interface;
   private messageHistory: ChatMessage[] = [];
+  private walletAddress: string;
 
   constructor() {
+    super('arbitrator', `arbitrator-${randomUUID()}`);
+
+    this.walletAddress = process.env.ARBITRATOR_WALLET!;
+    if (!this.walletAddress) {
+      throw new Error('ARBITRATOR_WALLET not configured in .env - please add your wallet address');
+    }
+
     this.rl = readline.createInterface({
       input: process.stdin,
       output: process.stdout,
@@ -23,9 +35,95 @@ class ArbitrerAgent {
     });
   }
 
+  protected setupEventHandlers(): void {
+    this.eventBus.subscribe('DISPUTE_FILED', this.handleDisputeFiled.bind(this));
+  }
+
+  private async arbitrateDispute(
+    dispute: any,
+    job: any
+  ): Promise<{decision: string, refundAmount: number, penaltyAmount: number, reputationDelta: number}> {
+
+    console.log('  🤖 Using AI to evaluate dispute...\n');
+
+    const arbitrationPrompt = `You are an impartial AI arbitrator evaluating a work dispute.
+
+JOB DETAILS:
+- Requirements: ${JSON.stringify(job.requirements)}
+- Budget: $${job.budget}
+
+DISPUTE:
+- Reason: ${dispute.reason}
+- Evidence: ${JSON.stringify(dispute.evidence)}
+
+EVALUATION CRITERIA:
+- < 70% complete: INCOMPLETE (full refund, $50 penalty, -40 reputation)
+- 70-90% complete: PARTIAL (50% refund, $25 penalty, -20 reputation)
+- > 90% complete: COMPLETE (no refund, no penalty, no reputation change)
+
+Provide your decision in this EXACT format:
+RULING: [INCOMPLETE|PARTIAL|COMPLETE]
+REASONING: [your detailed reasoning]
+REFUND: [dollar amount]
+PENALTY: [dollar amount]
+REPUTATION_DELTA: [number]`;
+
+    let decision = 'Work did not meet requirements';
+    let refundAmount = job.budget;
+    let penaltyAmount = 50;
+    let reputationDelta = -40;
+
+    try {
+      const response = query({
+        prompt: arbitrationPrompt,
+        options: {
+          apiKey: process.env.ANTHROPIC_API_KEY,
+          systemPrompt: 'You are a fair and impartial arbitrator. Analyze evidence objectively.',
+          includePartialMessages: true
+        }
+      });
+
+      let fullResponse = '';
+
+      for await (const message of response) {
+        if (message.type === 'stream_event') {
+          if (message.event.type === 'content_block_delta') {
+            if (message.event.delta.type === 'text_delta') {
+              const text = message.event.delta.text;
+              process.stdout.write(text);
+              fullResponse += text;
+            }
+          }
+        }
+      }
+
+      console.log('\n');
+
+      // Parse Claude's response
+      const rulingMatch = fullResponse.match(/RULING:\s*(INCOMPLETE|PARTIAL|COMPLETE)/i);
+      const reasoningMatch = fullResponse.match(/REASONING:\s*(.+?)(?=REFUND:|$)/s);
+      const refundMatch = fullResponse.match(/REFUND:\s*\$?(\d+)/);
+      const penaltyMatch = fullResponse.match(/PENALTY:\s*\$?(\d+)/);
+      const reputationMatch = fullResponse.match(/REPUTATION_DELTA:\s*(-?\d+)/);
+
+      if (reasoningMatch) decision = reasoningMatch[1].trim();
+      if (refundMatch) refundAmount = parseInt(refundMatch[1], 10);
+      if (penaltyMatch) penaltyAmount = parseInt(penaltyMatch[1], 10);
+      if (reputationMatch) reputationDelta = parseInt(reputationMatch[1], 10);
+
+    } catch (error) {
+      console.error('  ❌ AI arbitration failed, using default decision');
+    }
+
+    return { decision, refundAmount, penaltyAmount, reputationDelta };
+  }
+
   async start() {
+    // Start background event listener for automatic dispute processing
+    await this.startEventListener();
+
     console.log('🎯 ARBITRER AGENT\n');
-    console.log('I handle disputes, validate work, and manage settlements.\n');
+    console.log('I automatically handle disputes via EventBus and provide manual oversight when needed.\n');
     console.log('Commands: /history, /clear, /exit\n');
 
     // Configure MCP connection to Locus
@@ -34,7 +132,7 @@ class ArbitrerAgent {
         type: 'http' as const,
         url: 'https://mcp.paywithlocus.com/mcp',
         headers: {
-          'Authorization': `Bearer ${process.env.LOCUS_API_KEY}`
+          'Authorization': `Bearer ${process.env.ARBITRATOR_LOCUS_API_KEY}`
         }
       }
     };
@@ -49,6 +147,7 @@ class ArbitrerAgent {
       // Handle commands
       if (trimmed === '/exit' || trimmed === 'exit' || trimmed === 'quit') {
         console.log('\n👋 Goodbye!\n');
+        this.stopEventListener();
         process.exit(0);
       }
 
@@ -78,8 +177,118 @@ class ArbitrerAgent {
 
     this.rl.on('close', () => {
       console.log('\n👋 Goodbye!\n');
+      this.stopEventListener();
       process.exit(0);
     });
+  }
+
+  private async handleDisputeFiled(event: BaseEvent): Promise<void> {
+    const disputeEvent = event as DisputeFiledEvent;
+    const disputeId = disputeEvent.payload.disputeId;
+
+    console.log('\n⚖️ DISPUTE RECEIVED - Processing autonomously...');
+    console.log(`  📋 Job: ${disputeEvent.payload.jobId}`);
+    console.log(`  📋 Dispute: ${disputeId}`);
+    console.log(`  📋 Reason: ${disputeEvent.payload.reason}\n`);
+
+    try {
+      // Initialize marketplace
+      await marketplace.initMarketplace();
+
+      // Read dispute from marketplace
+      const dispute = await marketplace.readDispute(disputeId);
+
+      // Read job details from marketplace
+      const job = await marketplace.readJob(dispute.jobId);
+
+      // Use Claude AI for arbitration
+      console.log('  🤖 Evaluating evidence using AI reasoning...');
+      const { decision, refundAmount, penaltyAmount, reputationDelta } =
+        await this.arbitrateDispute(dispute, job);
+
+      const newReputation = 100 + reputationDelta; // Assuming base reputation 100
+
+      console.log(`  ⚖️ DECISION: ${decision}`);
+      console.log(`  💵 Refund: $${refundAmount}`);
+      console.log(`  ⚠️ Penalty: $${penaltyAmount}`);
+      console.log(`  📊 New reputation: ${newReputation}\n`);
+
+      // Update dispute status in marketplace
+      await marketplace.updateDispute(disputeId, {
+        status: 'resolved',
+        arbitratorDecision: {
+          ruling: refundAmount === job.budget ? 'INCOMPLETE' : refundAmount > 0 ? 'PARTIAL' : 'COMPLETE',
+          reasoning: decision,
+          refundAmount,
+          penaltyAmount,
+          decidedAt: new Date().toISOString()
+        }
+      });
+
+      // Update worker reputation
+      await marketplace.updateReputation('worker-agent', reputationDelta);
+
+      // Update worker stake (penalty)
+      await marketplace.updateWorkerStake('worker-agent', -penaltyAmount);
+
+      // Trigger Claude to execute refund autonomously
+      console.log('  💸 Executing refund via Locus...\n');
+
+      const hiringWallet = job.hiringAgent?.walletAddress || process.env.HIRING_AGENT_WALLET;
+
+      const mcpServers = {
+        'locus': {
+          type: 'http' as const,
+          url: 'https://mcp.paywithlocus.com/mcp',
+          headers: {
+            'Authorization': `Bearer ${process.env.ARBITRATOR_LOCUS_API_KEY}`
+          }
+        }
+      };
+
+      await this.sendMessage(
+        `Dispute ${disputeId} resolved: Work was ${refundAmount === job.budget ? 'INCOMPLETE' : refundAmount > 0 ? 'PARTIAL' : 'COMPLETE'}. Refund ${refundAmount} USDC to hiring agent wallet ${hiringWallet} with memo "Refund for dispute ${disputeId}". Execute the refund payment now using Locus send_to_address tool. Provide the transaction ID.`,
+        mcpServers
+      );
+
+      console.log('  ✅ Refund executed\n');
+
+      // Update job status
+      await marketplace.updateJobStatus(job.id, 'resolved');
+
+      // Publish arbitration decision automatically
+      await this.publishArbitrationComplete(disputeId, {
+        decision,
+        refundAmount,
+        penaltyAmount,
+        newReputation: { workerAgent: newReputation }
+      });
+
+      console.log('✅ Arbitration complete - Decision published\n');
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error(`  ❌ Error processing dispute: ${errorMessage}\n`);
+    }
+  }
+
+  private async publishArbitrationComplete(disputeId: string, decision: any): Promise<void> {
+    const event: ArbitrationCompleteEvent = {
+      id: this.generateEventId(),
+      type: 'ARBITRATION_COMPLETE',
+      timestamp: new Date().toISOString(),
+      sourceAgent: 'arbitrator',
+      payload: {
+        disputeId,
+        decision: decision.decision,
+        refundAmount: decision.refundAmount,
+        penaltyAmount: decision.penaltyAmount,
+        newReputation: decision.newReputation
+      },
+      processedBy: [],
+      status: 'pending'
+    };
+
+    await this.publishEvent(event);
   }
 
   private async sendMessage(userInput: string, mcpServers: any) {
@@ -99,15 +308,29 @@ class ArbitrerAgent {
           'mcp__read_resource'
         ],
         apiKey: process.env.ANTHROPIC_API_KEY,
-        systemPrompt: `You are an Arbitrer Agent that handles disputes and validates work via Locus.
+        systemPrompt: `You are an Arbitrator Agent in the VouchAI insurance marketplace. You autonomously resolve disputes and execute settlements via Locus (USDC on Base blockchain).
 
-Available commands:
-- Review and validate completed work
-- Handle dispute resolution
-- Manage settlements and payments
-- Verify work quality
+CRITICAL RESPONSIBILITIES:
+1. When disputes are filed, evaluate work quality using evidence
+2. Make fair decisions: COMPLETE, INCOMPLETE, or PARTIAL
+3. Execute refunds to hiring agents when work is incomplete
+4. Deduct penalties from worker stakes for poor work
 
-Be impartial and thorough.`,
+PAYMENT PROTOCOL:
+- Refunds: Send dispute refund USDC to hiring agent wallet
+- Use Locus send_to_address tool for all refunds
+- Confirm transaction IDs in your responses
+
+DECISION FRAMEWORK:
+- INCOMPLETE work (< 70% complete): Full refund to hiring agent + $50 penalty from worker $0.5 stake
+- PARTIAL work (70-90% complete): Partial refund + smaller penalty from worker $0.5 stake
+- COMPLETE work (> 90% complete): No refund, worker keeps payment
+
+WALLET ADDRESSES:
+- Hiring Agent: ${process.env.HIRING_AGENT_WALLET || '0xHiringWallet'}
+- Worker Agent: ${process.env.WORKER_AGENT_WALLET || '0xWorkerWallet'}
+
+You operate FULLY AUTONOMOUSLY - evaluate disputes and execute settlements immediately without waiting for human approval. Be decisive and fair.`,
         // Auto-approve all Locus tools
         canUseTool: async (toolName: string, input: Record<string, unknown>) => {
           if (toolName.startsWith('mcp__locus__')) {

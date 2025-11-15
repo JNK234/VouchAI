@@ -1,0 +1,21 @@
+{
+  "agents": {
+    "hiring-agent": {
+      "walletAddress": "0xHiring123",
+      "reputation": 100,
+      "jobsPosted": 0,
+      "jobsCompleted": 0,
+      "disputesFiled": 0,
+      "disputesWon": 0
+    },
+    "worker-agent": {
+      "walletAddress": "0xWorker456",
+      "reputation": 100,
+      "stakeAmount": 0,
+      "jobsAccepted": 0,
+      "jobsCompleted": 0,
+      "disputesAgainst": 0,
+      "penaltiesTotal": 0
+    }
+  }
+}
