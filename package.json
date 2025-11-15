@@ -1,0 +1,39 @@
+{
+  "name": "vouchai",
+  "version": "1.0.0",
+  "description": "AI Agent Insurance Marketplace - Trustworthy agent-to-agent commerce with mutual insurance protocol",
+  "main": "src/index.ts",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "hiring": "tsx src/agents/hiring/index.ts",
+    "worker": "tsx src/agents/worker/index.ts",
+    "arbitrator": "tsx src/agents/arbitrator/index.ts",
+    "demo": "tsx scripts/demo.ts",
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "type-check": "tsc --noEmit"
+  },
+  "keywords": [
+    "locus",
+    "claude",
+    "anthropic",
+    "mcp",
+    "ai",
+    "insurance",
+    "marketplace",
+    "agents",
+    "typescript"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.1.0",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2",
+    "tsx": "^4.19.2"
+  }
+}
