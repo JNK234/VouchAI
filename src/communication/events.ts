@@ -9,6 +9,7 @@ export type EventType =
   | 'JOB_CREATED'
   | 'JOB_ACCEPTED'
   | 'WORK_SUBMITTED'
+  | 'WORK_APPROVED'
   | 'DISPUTE_FILED'
   | 'ARBITRATION_COMPLETE'
   | 'PAYMENT_RELEASED';
@@ -113,6 +114,23 @@ export interface WorkSubmittedEvent extends BaseEvent {
 }
 
 /**
+ * Event emitted when hiring agent approves submitted work.
+ * Signals arbitrator to release payment from escrow.
+ */
+export interface WorkApprovedEvent extends BaseEvent {
+  type: 'WORK_APPROVED';
+  sourceAgent: 'hiring';
+  targetAgent: 'arbitrator';
+  payload: {
+    /** Job identifier for the approved work */
+    jobId: string;
+
+    /** Validation score achieved (0-100) */
+    validationScore: number;
+  };
+}
+
+/**
  * Event emitted when either party files a dispute.
  * Triggers arbitration process and notifies the arbitrator agent.
  */
@@ -190,6 +208,7 @@ export type VouchAIEvent =
   | JobCreatedEvent
   | JobAcceptedEvent
   | WorkSubmittedEvent
+  | WorkApprovedEvent
   | DisputeFiledEvent
   | ArbitrationCompleteEvent
   | PaymentReleasedEvent;

@@ -5,7 +5,7 @@ import 'dotenv/config';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import * as readline from 'readline';
 import { AgentSubscriber } from '../../communication/AgentSubscriber.js';
-import { WorkSubmittedEvent, ArbitrationCompleteEvent, JobCreatedEvent, BaseEvent } from '../../communication/events.js';
+import { WorkSubmittedEvent, WorkApprovedEvent, ArbitrationCompleteEvent, JobCreatedEvent, BaseEvent } from '../../communication/events.js';
 import { randomUUID } from 'crypto';
 import * as marketplace from '../../shared/marketplace.js';
 
@@ -168,85 +168,25 @@ class HiringAgent extends AgentSubscriber {
         await this.publishEvent(disputeEvent);
         console.log('   📤 Dispute filed and sent to arbitrator');
       } else {
-        console.log('   ✅ Work validated successfully - releasing payment\n');
+        console.log('   ✅ Work validated successfully - notifying arbitrator to release payment\n');
 
-        try {
-          // Read job to get worker wallet and budget
-          const job = await marketplace.readJob(workEvent.payload.jobId);
-          const workerWallet = job.workerAgent?.walletAddress || process.env.WORKER_AGENT_WALLET || '0xWorkerWallet';
+        // Publish WORK_APPROVED event to arbitrator
+        const workApprovedEvent: BaseEvent = {
+          id: this.generateEventId(),
+          type: 'WORK_APPROVED',
+          timestamp: new Date().toISOString(),
+          sourceAgent: 'hiring',
+          targetAgent: 'arbitrator',
+          payload: {
+            jobId: workEvent.payload.jobId,
+            validationScore
+          },
+          processedBy: [],
+          status: 'pending'
+        };
 
-          console.log(`   💸 Paying ${job.budget} USDC to worker...`);
-
-          const mcpServers = {
-            'locus': {
-              type: 'http' as const,
-              url: 'https://mcp.paywithlocus.com/mcp',
-              headers: {
-                'Authorization': `Bearer ${process.env.HIRING_AGENT_LOCUS_API_KEY}`
-              }
-            }
-          };
-
-          // Use Claude to execute payment via Locus
-          const paymentPrompt = `Send ${job.budget} USDC to ${workerWallet} with memo "Payment for completed job ${job.id}". Use the send_to_address tool.`;
-
-          const response = query({
-            prompt: paymentPrompt,
-            options: {
-              mcpServers,
-              allowedTools: ['mcp__locus__send_to_address'],
-              apiKey: process.env.ANTHROPIC_API_KEY,
-              canUseTool: async () => ({ behavior: 'allow' as const, updatedInput: {} })
-            }
-          });
-
-          let paymentTxId = 'pending';
-
-          for await (const message of response) {
-            if (message.type === 'assistant') {
-              const content = message.message.content;
-              for (const block of content) {
-                if (block.type === 'text' && block.text) {
-                  console.log(`   ${block.text}`);
-                  const txMatch = block.text.match(/0x[a-fA-F0-9]{64}/);
-                  if (txMatch) {
-                    paymentTxId = txMatch[0];
-                  }
-                }
-              }
-            }
-          }
-
-          console.log(`   ✅ Payment released: ${paymentTxId}\n`);
-
-          // Update job status
-          await marketplace.updateJobStatus(job.id, 'completed', {
-            paymentReleasedTxId: paymentTxId,
-            paidAt: new Date().toISOString()
-          });
-
-          // Publish PAYMENT_RELEASED event
-          const paymentEvent: BaseEvent = {
-            id: this.generateEventId(),
-            type: 'PAYMENT_RELEASED',
-            timestamp: new Date().toISOString(),
-            sourceAgent: 'hiring',
-            payload: {
-              jobId: job.id,
-              amount: job.budget,
-              recipientAgent: 'worker',
-              transactionId: paymentTxId
-            },
-            processedBy: [],
-            status: 'pending'
-          };
-
-          await this.publishEvent(paymentEvent);
-          console.log('   📤 PAYMENT_RELEASED event published\n');
-
-        } catch (error) {
-          console.error(`   ❌ Payment release failed: ${error}`);
-        }
+        await this.publishEvent(workApprovedEvent);
+        console.log('   📤 WORK_APPROVED event sent to arbitrator for payment release\n');
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);

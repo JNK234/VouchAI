@@ -5,7 +5,7 @@ import 'dotenv/config';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import * as readline from 'readline';
 import { AgentSubscriber } from '../../communication/AgentSubscriber.js';
-import { DisputeFiledEvent, ArbitrationCompleteEvent, BaseEvent } from '../../communication/events.js';
+import { DisputeFiledEvent, WorkApprovedEvent, ArbitrationCompleteEvent, BaseEvent } from '../../communication/events.js';
 import { randomUUID } from 'crypto';
 import * as marketplace from '../../shared/marketplace.js';
 
@@ -37,6 +37,7 @@ class ArbitrerAgent extends AgentSubscriber {
 
   protected setupEventHandlers(): void {
     this.eventBus.subscribe('DISPUTE_FILED', this.handleDisputeFiled.bind(this));
+    this.eventBus.subscribe('WORK_APPROVED', this.handleWorkApproved.bind(this));
   }
 
   private async arbitrateDispute(
@@ -180,6 +181,94 @@ REPUTATION_DELTA: [number]`;
       this.stopEventListener();
       process.exit(0);
     });
+  }
+
+  private async handleWorkApproved(event: BaseEvent): Promise<void> {
+    const workApprovedEvent = event as WorkApprovedEvent;
+    console.log(`\n💰 Work approved for job ${workApprovedEvent.payload.jobId}`);
+    console.log(`   Validation score: ${workApprovedEvent.payload.validationScore.toFixed(1)}%`);
+
+    try {
+      // Initialize marketplace
+      await marketplace.initMarketplace();
+
+      // Read job from marketplace
+      const job = await marketplace.readJob(workApprovedEvent.payload.jobId);
+      const workerWallet = job.workerAgent?.walletAddress || process.env.WORKER_AGENT_WALLET || '0xWorkerWallet';
+
+      console.log(`   💸 Paying ${job.budget} USDC to worker from escrow...`);
+
+      const mcpServers = {
+        'locus': {
+          type: 'http' as const,
+          url: 'https://mcp.paywithlocus.com/mcp',
+          headers: {
+            'Authorization': `Bearer ${process.env.ARBITRATOR_LOCUS_API_KEY}`
+          }
+        }
+      };
+
+      // Use Claude to execute payment via Locus
+      const paymentPrompt = `Send ${job.budget} USDC to ${workerWallet} with memo "Payment for completed job ${job.id}". Use the send_to_address tool.`;
+
+      const response = query({
+        prompt: paymentPrompt,
+        options: {
+          mcpServers,
+          allowedTools: ['mcp__locus__send_to_address'],
+          apiKey: process.env.ANTHROPIC_API_KEY,
+          canUseTool: async () => ({ behavior: 'allow' as const, updatedInput: {} })
+        }
+      });
+
+      let paymentTxId = 'pending';
+
+      for await (const message of response) {
+        if (message.type === 'assistant') {
+          const content = message.message.content;
+          for (const block of content) {
+            if (block.type === 'text' && block.text) {
+              console.log(`   ${block.text}`);
+              const txMatch = block.text.match(/0x[a-fA-F0-9]{64}/);
+              if (txMatch) {
+                paymentTxId = txMatch[0];
+              }
+            }
+          }
+        }
+      }
+
+      console.log(`   ✅ Payment released to worker: ${paymentTxId}`);
+      console.log(`   💼 Arbitrator keeps 1% premium from escrow\n`);
+
+      // Update job status
+      await marketplace.updateJobStatus(job.id, 'completed', {
+        paymentReleasedTxId: paymentTxId,
+        paidAt: new Date().toISOString()
+      });
+
+      // Publish PAYMENT_RELEASED event
+      const paymentEvent: BaseEvent = {
+        id: this.generateEventId(),
+        type: 'PAYMENT_RELEASED',
+        timestamp: new Date().toISOString(),
+        sourceAgent: 'arbitrator',
+        payload: {
+          jobId: job.id,
+          amount: job.budget,
+          recipientAgent: 'worker'
+        },
+        processedBy: [],
+        status: 'pending'
+      };
+
+      await this.publishEvent(paymentEvent);
+      console.log('   📤 PAYMENT_RELEASED event published\n');
+
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error(`   ❌ Error releasing payment: ${errorMessage}`);
+    }
   }
 
   private async handleDisputeFiled(event: BaseEvent): Promise<void> {

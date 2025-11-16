@@ -5,7 +5,8 @@
   "main": "src/index.ts",
   "type": "module",
   "scripts": {
-    "start": "tsx src/index.ts",
+    "start": "tsx src/agents/orchestrator/index.ts",
+    "orchestrator": "tsx src/agents/orchestrator/index.ts",
     "hiring": "tsx src/agents/hiring/index.ts",
     "worker": "tsx src/agents/worker/index.ts",
     "arbitrator": "tsx src/agents/arbitrator/index.ts",

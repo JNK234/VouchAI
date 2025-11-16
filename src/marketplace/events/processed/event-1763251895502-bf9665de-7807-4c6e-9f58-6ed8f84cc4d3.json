@@ -1,0 +1,16 @@
+{
+  "id": "event-1763251895502-bf9665de-7807-4c6e-9f58-6ed8f84cc4d3",
+  "type": "JOB_CREATED",
+  "timestamp": "2025-11-16T00:11:35.503Z",
+  "sourceAgent": "hiring",
+  "payload": {
+    "jobId": "job-1763251885857",
+    "budget": 0.1,
+    "requirements": "Implement fibonacci number calculation, Handle input validation, Return accurate fibonacci sequence values, Provide clear user interface or API"
+  },
+  "processedBy": [
+    "orchestrator-afd0737c-73f7-4248-8537-9cf065ca3fe5",
+    "hiring-9bf04946-03db-4d74-bda2-72e81e84f4b4"
+  ],
+  "status": "pending"
+}
