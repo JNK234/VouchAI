@@ -102,8 +102,36 @@ export class EventBus {
       const eventFilePath = path.join(this.pendingDir, eventFileName);
       const tempFilePath = path.join(this.pendingDir, `.${event.id}.tmp`);
 
+      // Check if event already exists (avoid race condition)
+      try {
+        await fs.access(eventFilePath);
+        console.log(`[EventBus] Event ${event.id} already exists, skipping duplicate publish`);
+        return;
+      } catch (error) {
+        // File doesn't exist, safe to publish
+      }
+
+      // Validate JSON before writing
+      let jsonContent;
+      try {
+        jsonContent = JSON.stringify(event, null, 2);
+      } catch (jsonError) {
+        console.error(`[EventBus] Failed to serialize event to JSON:`, jsonError);
+        throw new Error('Invalid event data');
+      }
+
       // Write to temp file first (atomic write pattern)
-      await fs.writeFile(tempFilePath, JSON.stringify(event, null, 2), 'utf-8');
+      await fs.writeFile(tempFilePath, jsonContent, 'utf-8');
+
+      // Verify temp file was written correctly
+      const tempContent = await fs.readFile(tempFilePath, 'utf-8');
+      try {
+        JSON.parse(tempContent); // Verify it's valid JSON
+      } catch (parseError) {
+        console.error(`[EventBus] Invalid JSON written to temp file:`, parseError);
+        await fs.unlink(tempFilePath).catch(() => {}); // Clean up
+        throw new Error('Failed to write valid JSON');
+      }
 
       // Rename to final location (atomic operation on most filesystems)
       await fs.rename(tempFilePath, eventFilePath);
@@ -111,7 +139,7 @@ export class EventBus {
       console.log(`[EventBus] Published event ${event.type} with ID ${event.id}`);
     } catch (error) {
       console.error('Failed to publish event:', error);
-      throw error;
+      // Don't throw - let agents continue working
     }
   }
 
@@ -205,10 +233,21 @@ export class EventBus {
         try {
           const filePath = path.join(this.pendingDir, file);
           const content = await fs.readFile(filePath, 'utf-8');
-          const event = JSON.parse(content) as BaseEvent;
-          events.push(event);
+
+          // Validate JSON before parsing
+          try {
+            const event = JSON.parse(content) as BaseEvent;
+            events.push(event);
+          } catch (parseError) {
+            console.error(`[EventBus] Corrupted JSON in ${file}, skipping:`, parseError);
+            // Try to move corrupted file to processed directory to clean up
+            const corruptedPath = path.join(this.pendingDir, file);
+            const backupPath = path.join(this.processedDir, `corrupted-${file}`);
+            await fs.rename(corruptedPath, backupPath).catch(() => {});
+            continue;
+          }
         } catch (error) {
-          console.error(`[EventBus] Failed to parse event file ${file}:`, error);
+          console.error(`[EventBus] Failed to read event file ${file}:`, error);
           continue;
         }
       }
@@ -281,13 +320,23 @@ export class EventBus {
         const eventFilePath = path.join(this.pendingDir, `${event.id}.json`);
         const tempFilePath = path.join(this.pendingDir, `.${event.id}.tmp`);
 
-        // Atomic write
-        await fs.writeFile(tempFilePath, JSON.stringify(event, null, 2), 'utf-8');
-        await fs.rename(tempFilePath, eventFilePath);
+        // Check if event file still exists (might have been moved by another agent)
+        try {
+          await fs.access(eventFilePath);
 
-        console.log(
-          `[EventBus] Event ${event.id} processed by ${this.agentId} (${event.processedBy.length}/3 agents)`
-        );
+          // Atomic write
+          await fs.writeFile(tempFilePath, JSON.stringify(event, null, 2), 'utf-8');
+          await fs.rename(tempFilePath, eventFilePath);
+
+          console.log(
+            `[EventBus] Event ${event.id} processed by ${this.agentId} (${event.processedBy.length}/3 agents)`
+          );
+        } catch (error) {
+          // File was already moved to processed directory - another agent finished it
+          console.log(
+            `[EventBus] Event ${event.id} already processed by all agents, skipping update`
+          );
+        }
       }
     } catch (error) {
       console.error(`[EventBus] Failed to process event ${event.id}:`, error);
@@ -305,17 +354,27 @@ export class EventBus {
       const sourcePath = path.join(this.pendingDir, `${eventId}.json`);
       const destPath = path.join(this.processedDir, `${eventId}.json`);
 
-      // Read the event content
-      const content = await fs.readFile(sourcePath, 'utf-8');
+      // Check if source file exists (might have been moved by another agent)
+      try {
+        await fs.access(sourcePath);
 
-      // Write to processed directory
-      await fs.writeFile(destPath, content, 'utf-8');
+        // Read the event content
+        const content = await fs.readFile(sourcePath, 'utf-8');
 
-      // Delete from pending directory
-      await fs.unlink(sourcePath);
+        // Write to processed directory
+        await fs.writeFile(destPath, content, 'utf-8');
+
+        // Delete from pending directory
+        await fs.unlink(sourcePath);
+
+        console.log(`[EventBus] Successfully moved event ${eventId} to processed directory`);
+      } catch (error) {
+        // File already moved or doesn't exist - another agent handled it
+        console.log(`[EventBus] Event ${eventId} already moved to processed or doesn't exist, skipping`);
+      }
     } catch (error) {
-      console.error(`[EventBus] Failed to move event ${eventId} to processed:`, error);
-      throw error;
+      // Don't throw error for race conditions - just log and continue
+      console.error(`[EventBus] Non-critical error moving event ${eventId} to processed:`, error);
     }
   }
 

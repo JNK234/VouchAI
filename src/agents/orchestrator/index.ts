@@ -1,5 +1,5 @@
-// ABOUTME: Orchestrator agent - single entry point for VouchAI system
-// ABOUTME: Manages all agents, provides CLI interface, and orchestrates the full job workflow
+// ABOUTME: Orchestrator agent - intelligent conversational entry point for VouchAI system
+// ABOUTME: Manages all agents, provides conversational AI interface, and orchestrates the full job workflow
 
 import 'dotenv/config';
 import { spawn, ChildProcess } from 'child_process';
@@ -11,19 +11,11 @@ import * as marketplace from '../../shared/marketplace.js';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { JobWorkflowState, ConversationMessage } from './types.js';
+import { buildOrchestratorSystemPrompt, buildEventNotificationPrompt } from './prompts.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-
-interface JobWorkflowState {
-  jobId: string;
-  description: string;
-  budget: number;
-  requirements: string[];
-  status: 'created' | 'accepted' | 'submitted' | 'validated' | 'resolved' | 'disputed';
-  startTime: number;
-  events: Array<{ type: EventType; timestamp: string; details: any }>;
-}
 
 class OrchestratorAgent extends AgentSubscriber {
   private rl: readline.Interface;
@@ -54,7 +46,7 @@ class OrchestratorAgent extends AgentSubscriber {
 
   async start(): Promise<void> {
     console.log('\n╔════════════════════════════════════════════════════════════╗');
-    console.log('║         🎯 VouchAI Orchestrator - Single Entry Point      ║');
+    console.log('║    🤖 VouchAI Orchestrator - Conversational AI Agent      ║');
     console.log('╚════════════════════════════════════════════════════════════╝\n');
     console.log('Starting all background services...\n');
 
@@ -73,13 +65,19 @@ class OrchestratorAgent extends AgentSubscriber {
 
     console.log('\n✅ All services running!\n');
     console.log('═══════════════════════════════════════════════════════════');
-    console.log('COMMANDS:');
-    console.log('  /create  - Create a new job (interactive)');
-    console.log('  /status  - Check status of active jobs');
-    console.log('  /exit    - Shutdown all services and exit');
+    console.log('💬 CONVERSATIONAL MODE');
+    console.log('═══════════════════════════════════════════════════════════');
+    console.log('Talk to me naturally! I can:');
+    console.log('  • Create jobs for you');
+    console.log('  • Check job status');
+    console.log('  • Explain how the system works');
+    console.log('  • Monitor and update you on progress');
+    console.log('');
+    console.log('Commands:');
+    console.log('  /status  - Quick status of all jobs');
+    console.log('  /exit    - Shutdown all services');
     console.log('═══════════════════════════════════════════════════════════\n');
-    console.log('💡 Example: /create\n');
-    console.log('   Then type: "Create job for fibonacci calculator, budget 0.1 USDC"\n');
+    console.log('💡 Try: "I need someone to build a REST API" or "What\'s happening with my jobs?"\n');
 
     this.rl.prompt();
 
@@ -87,6 +85,7 @@ class OrchestratorAgent extends AgentSubscriber {
     this.rl.on('line', async (input) => {
       const trimmed = input.trim();
 
+      // Handle special commands
       if (trimmed === '/exit' || trimmed === 'exit' || trimmed === 'quit') {
         await this.shutdown();
         return;
@@ -98,23 +97,14 @@ class OrchestratorAgent extends AgentSubscriber {
         return;
       }
 
-      if (trimmed === '/create' || trimmed.startsWith('/create ')) {
-        const jobDescription = trimmed.substring('/create'.length).trim();
-        if (jobDescription) {
-          await this.createJobFromInput(jobDescription);
-        } else {
-          console.log('\n📝 Please describe the job you want to create:');
-          console.log('   Example: "Create job for fibonacci calculator, budget 0.1 USDC, must be written in rust"\n');
-        }
+      // Handle empty input
+      if (!trimmed) {
         this.rl.prompt();
         return;
       }
 
-      // If not a command, treat as job creation
-      if (trimmed) {
-        await this.createJobFromInput(trimmed);
-      }
-
+      // All other input goes through conversational AI
+      await this.chat(trimmed);
       this.rl.prompt();
     });
 
@@ -127,6 +117,169 @@ class OrchestratorAgent extends AgentSubscriber {
       console.log('\n\n🛑 Received interrupt signal...');
       await this.shutdown();
     });
+  }
+
+  /**
+   * Main conversational interface
+   * Handles natural language input using Claude with tool access
+   */
+  private async chat(userMessage: string): Promise<void> {
+    try {
+      // Build dynamic system prompt with current state
+      const systemPrompt = buildOrchestratorSystemPrompt(
+        this.activeJobs,
+        ['Hiring Agent', 'Worker Agent', 'Arbitrator Agent']
+      );
+
+      // Query Claude for pure conversational response (NO TOOLS)
+      const response = query({
+        prompt: userMessage,
+        options: {
+          apiKey: process.env.ANTHROPIC_API_KEY,
+          systemPrompt,
+          model: 'claude-sonnet-4-20250514',
+          includePartialMessages: true
+          // NO tools, NO MCP servers - purely conversational
+        }
+      });
+
+      let assistantResponse = '';
+      let isStreaming = false;
+
+      for await (const message of response) {
+        if (message.type === 'stream_event') {
+          if (message.event.type === 'content_block_delta') {
+            if (message.event.delta.type === 'text_delta') {
+              if (!isStreaming) {
+                console.log('\n🤖 ');
+                isStreaming = true;
+              }
+              process.stdout.write(message.event.delta.text);
+              assistantResponse += message.event.delta.text;
+            }
+          }
+        } else if (message.type === 'assistant') {
+          const content = message.message.content;
+          for (const block of content) {
+            if (block.type === 'text' && block.text) {
+              if (!isStreaming) {
+                console.log('\n🤖 ');
+              }
+              if (!assistantResponse.includes(block.text)) {
+                console.log(block.text);
+                assistantResponse += block.text;
+              }
+            }
+          }
+        }
+      }
+
+      if (isStreaming) {
+        console.log('\n');
+      }
+
+      // Parse job requirements from user input to provide context to background agents
+      const jobDetails = this.extractJobRequirements(userMessage);
+      if (jobDetails) {
+        console.log(`📋 Creating job for background agents: ${jobDetails.description}`);
+        await this.createMinimalJob(jobDetails);
+      }
+
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error(`\n❌ Error: ${errorMessage}\n`);
+    }
+  }
+
+  /**
+   * Extract job requirements from user input
+   * Returns null if no clear job request found
+   */
+  private extractJobRequirements(userMessage: string): { description: string; budget: number; requirements: string[] } | null {
+    // Look for technical task indicators
+    const taskKeywords = /(build|create|make|develop|implement|write|design|code|function|calculator|api|website|app|program|script)/i;
+    if (!taskKeywords.test(userMessage)) {
+      return null; // Not a task request
+    }
+
+    // Extract description
+    const descMatch = userMessage.match(/(?:build|create|make|develop|implement|write|design|code|need|want)\s+(.+?)(?:\s*(?:with|for|budget|in|using)|\.|,|$)/i);
+    let description = descMatch ? descMatch[1].trim() : userMessage.substring(0, 50);
+
+    // Extract budget
+    const budgetMatch = userMessage.match(/\$?(\d+(?:\.\d+)?)\s*(?:USDC|usd|dollars?)?/i);
+    const budget = budgetMatch ? parseFloat(budgetMatch[1]) : 0.1;
+
+    // Extract requirements
+    const requirements: string[] = [];
+    const langMatch = userMessage.match(/(?:in|using|with)\s+(TypeScript|JavaScript|Python|Rust|Go|Java|C\+\+|React|Node\.js)/i);
+    if (langMatch) requirements.push(`Use ${langMatch[1]}`);
+
+    const testMatch = userMessage.match(/(?:with|include|add)\s+tests?/i);
+    if (testMatch) requirements.push('Include tests');
+
+    if (requirements.length === 0) {
+      requirements.push('High quality implementation', 'Well documented');
+    }
+
+    return { description, budget, requirements };
+  }
+
+  /**
+   * Create minimal job to provide context to background agents
+   */
+  private async createMinimalJob(jobDetails: { description: string; budget: number; requirements: string[] }): Promise<void> {
+    try {
+      // Create job spec
+      const jobSpec = {
+        title: jobDetails.description.substring(0, 50),
+        description: jobDetails.description,
+        requirements: jobDetails.requirements,
+        budget: jobDetails.budget,
+        hiringAgent: {
+          walletAddress: process.env.HIRING_AGENT_WALLET || '0xHiring123',
+          email: 'hiring@vouchai.com'
+        }
+      };
+
+      // Create job
+      const jobId = await marketplace.createJob(jobSpec);
+      console.log(`✅ Job created: ${jobId}`);
+
+      // Initialize workflow state
+      const workflowState: JobWorkflowState = {
+        jobId,
+        description: jobDetails.description,
+        budget: jobDetails.budget,
+        requirements: jobDetails.requirements,
+        status: 'created',
+        startTime: Date.now(),
+        events: []
+      };
+
+      this.activeJobs.set(jobId, workflowState);
+
+      // Publish JOB_CREATED event
+      const jobEvent: BaseEvent = {
+        id: this.generateEventId(),
+        type: 'JOB_CREATED',
+        timestamp: new Date().toISOString(),
+        sourceAgent: 'hiring',
+        payload: {
+          jobId,
+          budget: jobDetails.budget,
+          requirements: jobDetails.requirements.join(', ')
+        },
+        processedBy: [],
+        status: 'pending'
+      };
+
+      await this.publishEvent(jobEvent);
+      console.log('📤 JOB_CREATED event published - agents will handle automatically\n');
+
+    } catch (error) {
+      console.error(`❌ Job creation failed:`, error);
+    }
   }
 
   private async spawnServices(): Promise<void> {
@@ -183,78 +336,6 @@ class OrchestratorAgent extends AgentSubscriber {
       });
 
       console.log(`✅ Started [${service.name.toUpperCase()}] service (PID: ${child.pid})`);
-    }
-  }
-
-  private async createJobFromInput(input: string): Promise<void> {
-    console.log('\n📝 Processing job request...');
-
-    try {
-      // Use Claude to parse the job description
-      const parsePrompt = `Parse this job request and extract the key information.
-
-USER REQUEST:
-"${input}"
-
-Extract:
-1. Description: A clear description of what needs to be done
-2. Budget: The USDC amount (if not specified, suggest 0.1)
-3. Requirements: List of specific requirements (as an array)
-
-Respond in this EXACT JSON format (no markdown, just JSON):
-{
-  "description": "clear description here",
-  "budget": 0.1,
-  "requirements": ["requirement 1", "requirement 2", "requirement 3"]
-}`;
-
-      let jobSpec: any = null;
-
-      const response = query({
-        prompt: parsePrompt,
-        options: {
-          apiKey: process.env.ANTHROPIC_API_KEY,
-          systemPrompt: 'You are a job specification parser. Extract job details and respond with ONLY valid JSON. No markdown, no explanations, just JSON.',
-          model: 'claude-sonnet-4-20250514'
-        }
-      });
-
-      let fullResponse = '';
-
-      for await (const message of response) {
-        if (message.type === 'assistant') {
-          const content = message.message.content;
-          for (const block of content) {
-            if (block.type === 'text' && block.text) {
-              fullResponse += block.text;
-            }
-          }
-        }
-      }
-
-      // Extract JSON from response (handle markdown code blocks)
-      const jsonMatch = fullResponse.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        jobSpec = JSON.parse(jsonMatch[0]);
-      } else {
-        throw new Error('Could not parse job specification');
-      }
-
-      console.log('\n📋 Parsed Job Specification:');
-      console.log(`   Description: ${jobSpec.description}`);
-      console.log(`   Budget: $${jobSpec.budget} USDC`);
-      console.log(`   Requirements: ${jobSpec.requirements.join(', ')}\n`);
-
-      // Create the job
-      await this.createJobAndExecuteWorkflow(
-        jobSpec.description,
-        jobSpec.budget,
-        jobSpec.requirements
-      );
-
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      console.error(`\n❌ Error processing job: ${errorMessage}\n`);
     }
   }
 
@@ -393,6 +474,9 @@ Respond in this EXACT JSON format (no markdown, just JSON):
     }, 1000);
   }
 
+  /**
+   * Handle events and generate natural language notifications
+   */
   private async handleEvent(event: BaseEvent): Promise<void> {
     // Find jobs related to this event
     for (const [jobId, state] of this.activeJobs.entries()) {
@@ -408,37 +492,73 @@ Respond in this EXACT JSON format (no markdown, just JSON):
         switch (event.type) {
           case 'JOB_CREATED':
             state.status = 'created';
-            console.log(`\n📋 [${jobId}] Job created`);
             break;
           case 'JOB_ACCEPTED':
             state.status = 'accepted';
-            console.log(`\n✅ [${jobId}] Job accepted by worker`);
+            await this.generateEventNotification(event, jobId);
             break;
           case 'WORK_SUBMITTED':
             state.status = 'submitted';
-            console.log(`\n📦 [${jobId}] Work submitted`);
+            await this.generateEventNotification(event, jobId);
             break;
           case 'WORK_APPROVED':
             state.status = 'validated';
-            console.log(`\n✓ [${jobId}] Work validated (score: ${event.payload.validationScore}%)`);
+            await this.generateEventNotification(event, jobId);
             break;
           case 'DISPUTE_FILED':
             state.status = 'disputed';
-            console.log(`\n⚠️  [${jobId}] Dispute filed: ${event.payload.reason}`);
+            await this.generateEventNotification(event, jobId);
             break;
           case 'ARBITRATION_COMPLETE':
             state.status = 'resolved';
-            console.log(`\n⚖️  [${jobId}] Arbitration complete`);
-            console.log(`    Decision: ${event.payload.decision}`);
-            console.log(`    Refund: $${event.payload.refundAmount}`);
-            console.log(`    Penalty: $${event.payload.penaltyAmount}`);
+            await this.generateEventNotification(event, jobId);
             break;
           case 'PAYMENT_RELEASED':
-            console.log(`\n💰 [${jobId}] Payment released to ${event.payload.recipientAgent}`);
-            console.log(`    Amount: $${event.payload.amount}`);
+            await this.generateEventNotification(event, jobId);
             break;
         }
       }
+    }
+  }
+
+  /**
+   * Generate natural language notification for events
+   */
+  private async generateEventNotification(event: BaseEvent, jobId: string): Promise<void> {
+    try {
+      const prompt = buildEventNotificationPrompt(event.type, jobId, event.payload);
+
+      const response = query({
+        prompt,
+        options: {
+          apiKey: process.env.ANTHROPIC_API_KEY,
+          systemPrompt: 'You generate brief, friendly notifications. Just output the notification text, nothing else.',
+          model: 'claude-sonnet-4-20250514'
+        }
+      });
+
+      let notification = '';
+
+      for await (const message of response) {
+        if (message.type === 'assistant') {
+          const content = message.message.content;
+          for (const block of content) {
+            if (block.type === 'text' && block.text) {
+              notification += block.text;
+            }
+          }
+        }
+      }
+
+      if (notification) {
+        console.log(`\n${notification.trim()}\n`);
+        this.rl.prompt();
+      }
+
+    } catch (error) {
+      // Fallback to simple notification if AI generation fails
+      console.log(`\n📢 Event: ${event.type} for job ${jobId.substring(0, 8)}\n`);
+      this.rl.prompt();
     }
   }
 
