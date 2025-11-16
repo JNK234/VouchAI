@@ -36,12 +36,37 @@ class WorkerAgentService extends AgentSubscriber {
     this.eventBus.subscribe('ARBITRATION_COMPLETE', this.handleArbitrationComplete.bind(this));
   }
 
+  /**
+   * Ensure worker agent has at least 1 USDC stake for job acceptance
+   */
+  private async ensureWorkerStake(): Promise<void> {
+    try {
+      await marketplace.initMarketplace();
+      const agents = await marketplace.readAgents();
+      const workerAgent = agents.agents['worker-agent'];
+
+      if (!workerAgent || workerAgent.stakeAmount < 1) {
+        console.log('💰 Depositing 1 USDC stake for worker agent...');
+        await marketplace.updateWorkerStake('worker-agent', 1);
+        console.log('✅ Worker stake deposited successfully');
+      } else {
+        console.log(`💰 Worker already has stake: ${workerAgent.stakeAmount} USDC`);
+      }
+    } catch (error) {
+      console.error('❌ Failed to ensure worker stake:', error);
+      // Continue anyway - this shouldn't block the service
+    }
+  }
+
   async start(): Promise<void> {
     console.log('\n👷 WORKER AGENT SERVICE STARTING\n');
     console.log('Mode: Background service (no CLI interaction)');
     console.log('Listening for: JOB_CREATED, ARBITRATION_COMPLETE events');
     console.log('Auto-accept: Enabled (jobs will be accepted and completed automatically)\n');
     console.log('Press Ctrl+C to stop\n');
+
+    // Initialize marketplace and ensure worker has stake
+    await this.ensureWorkerStake();
 
     await this.startEventListener();
 
@@ -109,8 +134,8 @@ class WorkerAgentService extends AgentSubscriber {
       const agents = await marketplace.readAgents();
       const workerAgent = agents.agents['worker-agent'];
 
-      if (!workerAgent || workerAgent.stakeAmount === 0) {
-        console.log('   ⚠️ Warning: No stake deposited. Job acceptance may fail in production.');
+      if (!workerAgent || workerAgent.stakeAmount < 0.5) {
+        console.log('   ⚠️ Warning: Insufficient stake deposited. Job acceptance may fail in production.');
       }
 
       await marketplace.updateJobStatus(jobId, 'in_progress');
